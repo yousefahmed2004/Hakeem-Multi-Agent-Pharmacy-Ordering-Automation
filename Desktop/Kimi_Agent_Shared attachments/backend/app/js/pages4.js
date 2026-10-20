@@ -20,6 +20,19 @@ App.pages = App.pages || {};
   let pharmaciesSearchQuery = "";
 
   /* ============================================================
+     🆕🆕 طلبات الصيدلية "المحسوبة" فقط
+     ------------------------------------------------------------
+     الطلب مبيتحسب أوردر على الصيدلية في الإحصائيات إلا لما الصيدلي
+     يدوس "تم استلام الطلب" (أو يكون تنفيذ جزئي / خرج للتوصيل).
+     القاعدة نفسها موجودة في App.store.isCountedOrder (store.js).
+     ============================================================ */
+  function countedOrdersFor(orders, pharmacyId) {
+    return orders.filter((o) => o.pharmacyId === pharmacyId && S().isCountedOrder(o));
+  }
+
+  const isAcceptedLike = (o) => o.status === "accepted" || o.status === "closed";
+
+  /* ============================================================
      🆕 event delegation على document بالكامل بدل ما نعلّق
      listeners على عناصر بعينها جوه mount() (اللي ممكن يكون توقيتها
      أو تكرارها سبب مشاكل). الطريقة دي بتشتغل مهما كانت الصفحة
@@ -89,11 +102,12 @@ App.pages = App.pages || {};
       const orders = S().getOrders();
 
       // دالة مساعدة لحساب إحصائيات الصيدلية
+      // 🆕 بتحسب بس الطلبات اللي الصيدلي داس عليها "تم استلام الطلب"
       function getPharmacyStats(pharmacyId) {
-        const phOrders = orders.filter((o) => o.pharmacyId === pharmacyId);
+        const phOrders = countedOrdersFor(orders, pharmacyId);
         return {
           total: phOrders.length,
-          accepted: phOrders.filter((o) => o.status === "accepted").length,
+          accepted: phOrders.filter(isAcceptedLike).length,
           partial: phOrders.filter((o) => o.status === "partial").length,
           rejected: phOrders.filter((o) => o.status === "rejected").length,
           totalRevenue: phOrders
@@ -341,7 +355,8 @@ App.pages = App.pages || {};
       }
 
       const orders = S().getOrders();
-      const phOrders = orders.filter((o) => o.pharmacyId === pharmacyId);
+      // 🆕🆕 بس الطلبات اللي الصيدلي داس عليها "تم استلام الطلب" (أو تنفيذ جزئي / خرج للتوصيل)
+      const phOrders = countedOrdersFor(orders, pharmacyId);
 
       // الفترة السريعة المختارة حاليًا (أو "month" بشكل افتراضي)
       const currentPeriod = selectedPeriods[pharmacyId] || "month";
@@ -366,7 +381,7 @@ App.pages = App.pages || {};
 
         return {
           total: filtered.length,
-          accepted: filtered.filter((o) => o.status === "accepted").length,
+          accepted: filtered.filter(isAcceptedLike).length,
           partial: filtered.filter((o) => o.status === "partial").length,
           rejected: filtered.filter((o) => o.status === "rejected").length,
           revenue: filtered
@@ -559,11 +574,11 @@ App.pages = App.pages || {};
                              <td><code style="background:var(--bg-soft);padding:4px 8px;border-radius:6px;font-size:12px">#${esc(o.id)}</code></td>
                              <td>${esc(o.customerName)}</td>
                              <td>
-                               <div class="small" style="max-width:150px;overflow:hidden;text-overflow:ellipsis">${o.items.slice(0, 2).map(esc).join("، ")}${o.items.length > 2 ? "…" : ""}</div>
+                               <div class="small" style="max-width:150px;overflow:hidden;text-overflow:ellipsis">${o.items.slice(0, 2).map((m) => esc(typeof m === "string" ? m : (m.name || ""))).join("، ")}${o.items.length > 2 ? "…" : ""}</div>
                              </td>
                              <td>
-                               <span class="badge badge-${o.status === "accepted" ? "accepted" : o.status === "partial" ? "partial" : "rejected"}">
-                                 ${o.status === "accepted" ? "منفذة" : o.status === "partial" ? "جزئية" : "مرفوضة"}
+                               <span class="badge badge-${isAcceptedLike(o) ? "accepted" : o.status === "partial" ? "partial" : "rejected"}">
+                                 ${isAcceptedLike(o) ? "منفذة" : o.status === "partial" ? "جزئية" : "مرفوضة"}
                                </span>
                              </td>
                              <td>${fmtMoney(o.price || 0)}</td>
