@@ -71,13 +71,29 @@ App.pages = App.pages || {};
   }
 
   /* ============================================================
+     🆕 canSeePhone(o) — قاعدة ظهور رقم العميل
+     ------------------------------------------------------------
+     - الأدمن: دايمًا يشوف الرقم.
+     - الصيدلي: يشوف الرقم فقط لو هو المسؤول عن الطلب *ودوس* "تم
+       استلام الطلب" (workflowStatus = received أو أي خطوة بعدها).
+       مجرد قبول الطلب (awaiting_receipt) مش كفاية.
+     ============================================================ */
+  const RECEIVED_STAGES = ["received", "preparing", "ready", "out_for_delivery", "delivered"];
+  function canSeePhone(o) {
+    const user = S().currentUser();
+    if (!user) return false;
+    if (user.role === "admin") return true;
+    return o.pharmacyId === user.id && RECEIVED_STAGES.includes(o.workflowStatus);
+  }
+
+  /* ============================================================
      مكونات مشتركة
      ============================================================ */
   function orderCard(o, { showPharmacy = true, showPhone = false } = {}) {
     const st = STATUS[o.status] || STATUS.pending;
     const meds = o.items.slice(0, 4).map((m) => `<span class="med-chip">${icon("pill", 12)} ${medLabel(m)}</span>`).join("");
     const more = o.items.length > 4 ? `<span class="med-chip more">+${o.items.length - 4}</span>` : "";
-    const phoneRow = showPhone && o.status === "accepted"
+    const phoneRow = showPhone && canSeePhone(o) && o.phone
       ? `<div>${icon("phone", 14)} <span class="mono" dir="ltr">${esc(o.phone)}</span></div>`
       : "";
     /* 🆕 لو الطلب ده ناتج عن تقسيم طلب أقدم (تنفيذ جزئي) نعرض إشارة صغيرة
@@ -146,7 +162,7 @@ App.pages = App.pages || {};
                   <div class="cell-main">${esc(o.customerName)}</div>
                   <div class="cell-sub">${esc(o.address)}</div>
                 </td>
-                <td class="td-phone mono" data-label="الهاتف" dir="ltr" style="text-align:right">${showPhone || o.status === "accepted" ? esc(o.phone) : '<span class="muted small">—</span>'}</td>
+                <td class="td-phone mono" data-label="الهاتف" dir="ltr" style="text-align:right">${canSeePhone(o) && o.phone ? esc(o.phone) : '<span class="muted small">—</span>'}</td>
                 <td class="td-meds" data-label="الأدوية"><div class="med-chips">${o.items.slice(0, 2).map((m) => `<span class="med-chip">${medLabel(m)}</span>`).join("")}${o.items.length > 2 ? `<span class="med-chip more">+${o.items.length - 2}</span>` : ""}</div></td>
                 ${showPharmacy ? `<td class="td-pharmacy" data-label="الصيدلية">${o.pharmacyName ? esc(o.pharmacyName) : '<span class="muted small">—</span>'}</td>` : ""}
                 <td class="td-status" data-label="الحالة">${statusBadge(o.status)}</td>
@@ -159,7 +175,7 @@ App.pages = App.pages || {};
       </div>`;
   }
 
-  App.shared = { orderCard, ordersTable, medLabel, formatCountdown, ensureGlobalCountdownTicker };
+  App.shared = { orderCard, ordersTable, medLabel, formatCountdown, ensureGlobalCountdownTicker, canSeePhone, RECEIVED_STAGES };
 
   /* ============================================================
      لوحة التحكم الرئيسية
@@ -323,7 +339,7 @@ App.pages.dashboard = {
     const q = ordersFilter.q.trim().toLowerCase();
     if (q) list = list.filter((o) =>
       o.id.includes(q) || o.customerName.toLowerCase().includes(q) ||
-      o.phone.includes(q) || o.items.some((m) => (typeof m === "string" ? m : (m.name || "")).toLowerCase().includes(q)) ||
+      (o.phone || "").includes(q) || o.items.some((m) => (typeof m === "string" ? m : (m.name || "")).toLowerCase().includes(q)) ||
       (o.pharmacyName || "").includes(q));
 
     document.getElementById("orders-list").innerHTML = ordersTable(list, { showPhone: true });
@@ -607,8 +623,12 @@ App.pages.dashboard = {
       return `<button class="btn btn-soft btn-sm" data-workflow="${item.key}" ${disabled ? "disabled" : ""}${titleAttr} style="${isDone ? "opacity:.55" : ""}${isChainBlocked ? "opacity:.55;cursor:not-allowed" : ""}">${isDone ? icon("check", 13) + " " : ""}${isChainBlocked ? icon("clock", 13) + " " : ""}${item.label}</button>`;
     }).join("");
 
-    const cancelDisabled = isTerminal;
-    const cancelButton = `<button class="btn btn-danger-soft btn-sm" data-workflow="cancelled" ${cancelDisabled ? "disabled" : ""}>${icon("xCircle", 13)} إلغاء الطلب</button>`;
+    /* 🆕 زرار الإلغاء يفضل موجود لحد ما الصيدلي يدوس "تم استلام الطلب" —
+       بعدها (currentIdx >= 0) يتشال خالص من قدامه */
+    const alreadyReceived = currentIdx >= 0;
+    const cancelButton = (alreadyReceived || isTerminal)
+      ? ""
+      : `<button class="btn btn-danger-soft btn-sm" data-workflow="cancelled">${icon("xCircle", 13)} إلغاء الطلب</button>`;
 
     return { html: stepButtons + cancelButton, chainStatus };
   }
@@ -634,7 +654,8 @@ App.pages.dashboard = {
        معندهاش تحكم في الـ workflow، الطلب هيتشحن مع باقي السلسلة أوتوماتيك لما الصيدلية
        اللي كملت الباقي (accepted كامل) توصل لـ"خرج للتوصيل" — شوف الشرح تحت partialInfoBannerHTML */
     const canManageWorkflow = user.role === "pharmacist" && (o.status === "accepted" || o.status === "closed") && o.pharmacyId === user.id;
-    const canShowPhone = user.role === "admin" || ((o.status === "accepted" || o.status === "partial" || o.status === "closed") && o.pharmacyId === user.id);
+    /* 🆕 رقم العميل: الأدمن دايمًا، والصيدلي بس بعد ما يدوس "تم استلام الطلب" */
+    const canShowPhone = App.shared.canSeePhone(o);
     const capacityReached = user.role === "pharmacist" && o.status === "pending" && !S().canAcceptOrder(user);
     const workflowStateMap = { awaiting_receipt: "في انتظار تأكيد الاستلام", received: "تم استلام الطلب", preparing: "جاري التجهيز", ready: "جاهز للتوصيل", out_for_delivery: "خرج للتوصيل", delivered: "تم التسليم", cancelled: "إلغاء الطلب" };
     const executionHint = o.executionPending && o.executionDeadline
@@ -785,7 +806,7 @@ App.pages.dashboard = {
               <div class="card-head"><div class="card-title">${icon("user", 20)} بيانات العميل</div></div>
               <div class="info-list">
                 <div class="info-row"><div class="i-ico">${icon("user", 18)}</div><div><div class="i-label">اسم العميل</div><div class="i-value">${esc(o.customerName)}</div></div></div>
-                ${canShowPhone ? `<div class="info-row"><div class="i-ico">${icon("phone", 18)}</div><div><div class="i-label">رقم الهاتف</div><div class="i-value mono" dir="ltr">${esc(o.phone)}</div></div></div>` : ""}
+                ${canShowPhone && o.phone ? `<div class="info-row"><div class="i-ico">${icon("phone", 18)}</div><div><div class="i-label">رقم الهاتف</div><div class="i-value mono" dir="ltr">${esc(o.phone)}</div></div></div>` : ""}
                 <div class="info-row"><div class="i-ico">${icon("pin", 18)}</div><div><div class="i-label">العنوان</div><div class="i-value">${esc(o.address)}</div></div></div>
                 <div class="info-row"><div class="i-ico">${icon("store", 18)}</div><div><div class="i-label">الصيدلية المنفذة</div><div class="i-value">${o.pharmacyName ? esc(o.pharmacyName) : '<span class="muted">لم يُسند بعد</span>'}</div></div></div>
               </div>
