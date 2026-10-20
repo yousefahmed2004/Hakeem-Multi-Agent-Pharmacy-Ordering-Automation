@@ -458,6 +458,10 @@ window.App = window.App || {};
        ⚠️ ملحوظة: بما إن الدالة بقت async، أي كود بينادي
        S().login(...) لازم يستخدم await (اتعدّل بالفعل في
        pages3.js).
+
+       🆕 بعد نجاح الدخول بنعمل syncOrders() فورًا — لأن السيرفر بقى
+       بيحدد ظهور رقم العميل حسب هوية اللي بيطلب (viewerId/viewerRole
+       في api.js)، فلازم نجيب الطلبات تاني بعد ما الهوية تتحدد.
        ============================================================ */
     async login(username, password) {
       const cleanUsername = String(username).trim();
@@ -475,6 +479,7 @@ window.App = window.App || {};
           save(); emit();
 
           sessionStorage.setItem(SESSION_KEY, userToStore.id);
+          syncOrders(); // 🆕 جيب الطلبات بهوية المستخدم الجديد (عشان رقم العميل)
           return { ok: true, user: userToStore };
         }
 
@@ -914,6 +919,10 @@ window.App = window.App || {};
        الشحن لما توصل لـ"خرج للتوصيل" — شوف trySendCombinedShippingWebhook
        في orders.js (الباك إند) اللي بقى بيستثني الأطراف "partial"
        من شرط "الكل لازم يوصل خرج للتوصيل".
+
+       🆕 (تعديل) ممنوع الإلغاء بعد "تم استلام الطلب": أول ما الصيدلي
+       يدوس "تم استلام الطلب" (workflowStatus = received أو أي خطوة
+       بعدها) الإلغاء بيترفض هنا (وكمان في الباك إند — شوف PUT /orders/:id).
        ============================================================ */
     updateOrderWorkflowStatus(id, user, workflowStatus, price) {
       const o = this.getOrder(id);
@@ -927,6 +936,11 @@ window.App = window.App || {};
         cancelled: "إلغاء الطلب",
       };
       if (!workflowLabels[workflowStatus]) return null;
+
+      /* 🆕 ممنوع الإلغاء بعد تأكيد الاستلام */
+      if (workflowStatus === "cancelled" && ["received", "preparing", "ready", "out_for_delivery", "delivered"].includes(o.workflowStatus)) {
+        return null;
+      }
 
       if (workflowStatus === "out_for_delivery") {
         const chainStatus = this.chainShippingStatus(o);
