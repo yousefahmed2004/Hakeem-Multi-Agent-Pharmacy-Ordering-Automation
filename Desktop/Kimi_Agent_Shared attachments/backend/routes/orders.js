@@ -48,6 +48,38 @@ const UNIT_KEYWORDS = [
     "كبسولة", "كبسولات", "بخاخ", "قطارة", "sachet", "strip", "box", "vial", "bottle", "tube",
 ];
 
+/* ============================================================
+    🆕 خصوصية رقم العميل (Phone Privacy)
+    ------------------------------------------------------------
+    رقم العميل بيتشال من الرد (phone = "") إلا في الحالات دي:
+    - المستخدم أدمن (viewerRole=admin).
+    - المستخدم صيدلي (viewerId) وهو المسؤول عن الطلب (pharmacyId)
+      *ودوس "تم استلام الطلب"* — يعني workflowStatus واحدة من
+      PHONE_VISIBLE_STAGES (received وما بعدها).
+    الهوية بتيجي من query (viewerId / viewerRole) اللي api.js بيبعتها.
+
+    ⚠️ ملحوظة أمان: مفيش توكن/جلسة على الـ API (لا JWT ولا cookie)، فالهوية
+    دي بتتبعت من المتصفح نفسه ويقدر أي حد يزوّرها. الحماية دي بتمنع الظهور
+    العادي ومحاولات DevTools البسيطة، لكن الحماية الكاملة محتاجة توكن
+    موقّع (JWT) على مستوى الـ API كله.
+    ============================================================ */
+const PHONE_VISIBLE_STAGES = ["received", "preparing", "ready", "out_for_delivery", "delivered"];
+
+function getViewer(req) {
+    return {
+        id: String((req.query && req.query.viewerId) || ""),
+        role: String((req.query && req.query.viewerRole) || ""),
+    };
+}
+
+function canViewerSeePhone(order, viewer) {
+    if (!viewer) return false;
+    if (viewer.role === "admin") return true;
+    if (!viewer.id) return false;
+    const ownerId = order.pharmacyId || order.pharmacy_id || "";
+    return String(ownerId) === viewer.id && PHONE_VISIBLE_STAGES.includes(order.workflowStatus || "");
+}
+
 function splitMedicineItem(raw) {
     if (raw && typeof raw === "object" && !Array.isArray(raw)) {
         const rawName = String(raw.name || raw.drug_name || raw.text || "").trim();
@@ -314,15 +346,18 @@ async function expireStalePendingOrders() {
     بيترجع null لأي طلب مش فرعي، أو فرعي بس خرج من حالة "pending"
     (يعني اتقبل / اتعمل عليه تنفيذ جزئي / اتقفل نفاد من السوق) —
     عشان الفرونت يعرف يوقف يعرض العدّاد فورًا.
+
+    🆕 (تعديل) بقت بتاخد viewer كباراميتر تاني، والـ phone بيترجع فاضي
+    إلا لو canViewerSeePhone (شوف فوق).
     ============================================================ */
-function formatOrderRow(order) {
+function formatOrderRow(order, viewer) {
     const extractedImage = extractPrescriptionImage(order);
     const createdAtIso = order.createdAt || order.created_at ? new Date(order.createdAt || order.created_at).toISOString() : new Date().toISOString();
     const normalizedStatus = normalizeStatus(order.status);
     return {
         id: String(order.id),
         customerName: order.customerName || order.customer_name,
-        phone: order.phone || "",
+        phone: canViewerSeePhone(order, viewer) ? (order.phone || "") : "",
         address: order.address || "",
         items: resolveItems(order),
         prescriptionImage: extractedImage,
@@ -747,6 +782,7 @@ router.get("/orders", async (req, res) => {
         retryPendingShippingWebhooks().catch(() => {}); // لا ننتظرها — لا يجب أن تؤخر رد القائمة
 
         const { status } = req.query;
+        const viewer = getViewer(req); // 🆕 هوية اللي بيطلب (لخصوصية رقم العميل)
         let query = `
             SELECT 
                 o.*,
@@ -773,7 +809,7 @@ router.get("/orders", async (req, res) => {
 
         const rows = status ? await db.all(query, [status]) : await db.all(query);
 
-        const formattedOrders = rows.map(formatOrderRow);
+        const formattedOrders = rows.map((row) => formatOrderRow(row, viewer));
 
         // 🆕 إلحاق pendingChildOrderId / pendingChildDeadline على أي طلب
         // "أب" عنده طلب "ابن" لسه pending — عشان يبان عدّاد المهلة عند
@@ -800,6 +836,7 @@ router.get("/orders/:id", async (req, res) => {
         await expireStaleChildOrders();
 
         const { id } = req.params;
+        const viewer = getViewer(req); // 🆕 هوية اللي بيطلب (لخصوصية رقم العميل)
         const query = `
             SELECT 
                 o.*,
@@ -830,7 +867,7 @@ router.get("/orders/:id", async (req, res) => {
         );
 
         const formattedOrder = {
-            ...formatOrderRow(order),
+            ...formatOrderRow(order, viewer),
             timeline: timelineRows.length ? timelineRows.map((t) => ({
                 at: new Date(t.at).toISOString(),
                 text: t.text,
@@ -1032,6 +1069,12 @@ router.post("/orders/:id/accept", async (req, res) => {
     و"خرج للتوصيل" برضو لسه بتتحقق من computeChainShippingBlock —
     (مفيش طرف تاني في السلسلة لسه "pending").
 
+    🆕 (تعديل) قفل الإلغاء: بعد ما الصيدلي يدوس "تم استلام الطلب"
+    (workflowStatus الحالي في DB = received أو أي خطوة بعدها)، أي
+    محاولة ترجّع الطلب للـ pool (workflowStatus = cancelled، أو
+    status = pending) بتترفض 409. الفرونت إند بيعمل الإلغاء بإنه يبعت
+    status = pending + workflowStatus = null، فالفحص بيغطي الشكلين.
+
     ⚠️ ملحوظة: قبول الطلب بالكامل (accept) بقى ليه endpoint خاص أعلى
     (POST /orders/:id/accept) لأنه بيحتاج قفل صف حقيقي (FOR UPDATE)
     يمنع التسابق بين صيدليتين — الفرونت إند بقى بينادي عليه بدل ما
@@ -1048,12 +1091,28 @@ router.put("/orders/:id", async (req, res) => {
             timelineText, timelineColor,
         } = req.body;
 
-        if (workflowStatus) {
-            const currentOrder = await db.get(`SELECT id, status, "rootOrderId" FROM orders WHERE id = $1`, [id]);
-            if (!currentOrder) {
-                return res.status(404).json({ ok: false, error: "الطلب غير موجود" });
-            }
+        const currentOrder = await db.get(
+            `SELECT id, status, "workflowStatus", "rootOrderId" FROM orders WHERE id = $1`,
+            [id]
+        );
+        if (!currentOrder) {
+            return res.status(404).json({ ok: false, error: "الطلب غير موجود" });
+        }
 
+        // 🆕 قفل الإلغاء بعد "تم استلام الطلب"
+        const alreadyReceived = PHONE_VISIBLE_STAGES.includes(currentOrder.workflowStatus || "");
+        const triesToReturnToPool =
+            workflowStatus === "cancelled" ||
+            (!workflowStatus && status && normalizeStatus(status) === "pending");
+        if (alreadyReceived && triesToReturnToPool) {
+            return res.status(409).json({
+                ok: false,
+                error: "لا يمكن إلغاء الطلب بعد تأكيد استلامه",
+                cancelLocked: true,
+            });
+        }
+
+        if (workflowStatus) {
             // 🆕 حماية مطلقة: طلب "partial" ممنوع يتغير فيه workflowStatus خالص
             if (normalizeStatus(currentOrder.status) === "partial") {
                 return res.status(409).json({
@@ -1605,7 +1664,7 @@ router.get("/orders/:id/shortages", async (req, res) => {
     🔁 بروكسي: إرسال تحديث الشحن إلى n8n Webhook
     ============================================================ */
 router.post("/webhook/shipping", async (req, res) => {
-    res.json({ ok: true, message: "تم الاستلام — الإرسال الفعلي مركزي داخل السيرفر (رسالة موحّدة لكل الصيدليات)" });
+    res.json({ ok: true, message: "تم الاستلام — الإرسال الفعلي مركزي داخل السيرفر (رسالة موحدة لكل الصيدليات)" });
 });
 
 module.exports = router;
