@@ -41,6 +41,29 @@ window.App = window.App || {};
   const AVATAR_COLORS = ["#0ea5e9", "#2563eb", "#10b981", "#8b5cf6", "#f59e0b", "#ef4444", "#06b6d4", "#ec4899"];
 
   /* ============================================================
+     🆕 مراحل "تم استلام الطلب" وما بعدها
+     ------------------------------------------------------------
+     الطلب مبيتحسبش "أوردر" على الصيدلي في الإحصائيات بمجرد القبول
+     (awaiting_receipt) — بيتحسب بس لما الصيدلي يدوس "تم استلام الطلب"
+     (workflowStatus = received أو أي خطوة بعدها). لو الصيدلي قبل الطلب
+     وما دوسش استلام، المهلة بتخلص (5 دقايق) والطلب بيرجع للـ pool،
+     فمينفعش يكون اتحسب عليه.
+     ============================================================ */
+  const RECEIVED_STAGES = ["received", "preparing", "ready", "out_for_delivery", "delivered"];
+
+  /* 🆕 isCountedOrder(o) — هل الطلب ده يتحسب كـ "أوردر" عند الصيدلية في الإحصائيات؟
+     - partial: بيتحسب (الباك إند بيسجّله workflowStatus = received فورًا عند التنفيذ الجزئي)
+     - closed:  بيتحسب (الطلب خرج للتوصيل يعني مرّ على الاستلام أكيد)
+     - accepted: بيتحسب فقط لو workflowStatus في مراحل الاستلام وما بعدها */
+  function isCountedOrder(o) {
+    if (!o) return false;
+    if (o.status === "partial") return true;
+    if (o.status === "closed") return true;
+    if (o.status === "accepted") return RECEIVED_STAGES.includes(o.workflowStatus || "");
+    return false;
+  }
+
+  /* ============================================================
      🆕 دالة مساعدة موحّدة لاستخراج اسم الدواء من عنصر items
      ------------------------------------------------------------
      items ممكن يوصلوا بشكلين:
@@ -145,9 +168,10 @@ window.App = window.App || {};
           const roll = rnd();
           const actedAt = laterISO(created, rndInt(5, 180), rnd);
           if (roll < 0.5) {
-            /* مقبول */
+            /* مقبول (بيانات تجريبية: اعتبره اتسلّم عشان يتحسب في الإحصائيات) */
             const ph = pick(pharmacists.filter((p) => p.status === "active"));
             order.status = "accepted";
+            order.workflowStatus = "delivered";
             order.pharmacyId = ph.id; order.pharmacyName = ph.pharmacyName;
             order.availableItems = [...items];
             order.price = rndInt(8, 90) * 10;
@@ -156,6 +180,7 @@ window.App = window.App || {};
             /* جزئي */
             const ph = pick(pharmacists.filter((p) => p.status === "active"));
             order.status = "partial";
+            order.workflowStatus = "received";
             order.pharmacyId = ph.id; order.pharmacyName = ph.pharmacyName;
             const availCount = rndInt(1, items.length - 1);
             const shuffled = [...items].sort(() => rnd() - 0.5);
@@ -439,6 +464,11 @@ window.App = window.App || {};
   /* ---------- الواجهة العامة ---------- */
   App.store = {
     onChange(f) { listeners.change.push(f); },
+
+    /* 🆕 متاحة للصفحات التانية (pages4.js وغيرها) عشان نفس قاعدة
+       "الأوردر بيتحسب لما يدوس تم استلام الطلب" تتطبق في كل مكان */
+    isCountedOrder,
+    RECEIVED_STAGES,
 
     /* ============================================================
        🛠️ (تعديل جذري) login()
@@ -878,7 +908,7 @@ window.App = window.App || {};
       const o = this.getOrder(id);
       const pharmacist = db.users.find((u) => u.id === user.id) || user;
       if (!o || !(o.status === "accepted" || o.status === "closed") || o.pharmacyId !== user.id) return null;
-       if (["delivered", "cancelled"].includes(o.workflowStatus)) return null; // الخطوة خلصت خلاص، مينفعش نرجع نغيرها
+      if (["delivered", "cancelled"].includes(o.workflowStatus)) return null; // الخطوة خلصت خلاص، مينفعش نرجع نغيرها
       ensureExecutionProfile(pharmacist);
       pharmacist.executionPoints = Math.min(100, pharmacist.executionPoints + 10);
       pharmacist.executionStats.executed += 1;
@@ -948,7 +978,7 @@ window.App = window.App || {};
       if (!workflowLabels[workflowStatus]) return null;
 
       /* 🆕 ممنوع الإلغاء بعد تأكيد الاستلام */
-      if (workflowStatus === "cancelled" && ["received", "preparing", "ready", "out_for_delivery", "delivered"].includes(o.workflowStatus)) {
+      if (workflowStatus === "cancelled" && RECEIVED_STAGES.includes(o.workflowStatus)) {
         return null;
       }
 
@@ -967,29 +997,28 @@ window.App = window.App || {};
       o.executionPending = false;
       o.executionDeadline = null;
 
-      o.workflowStatus = workflowStatus;
       /* الحالة النهائية (closed) هتتحدد في الباك إند نفسه لما يوصله
          workflowStatus = "out_for_delivery" — هنا بنعكسها محليًا فورًا
          كمان عشان الواجهة تتحدث فورًا من غير ما تستنى المزامنة */
       o.workflowStatus = workflowStatus;
-if (workflowStatus === "out_for_delivery") {
-  o.status = "closed";
-}
-if (workflowStatus === "delivered") {
-  o.deliveredAt = new Date().toISOString();
-}
-if (workflowStatus === "cancelled") {
-  // يرجع الطلب لقائمة الانتظار عند باقي الصيادلة
-  if (!o.rejectedBy) o.rejectedBy = [];
-  if (!o.rejectedBy.includes(user.id)) o.rejectedBy.push(user.id); // عشان نفس الصيدلي ما ياخدوش تاني فورًا
-  o.status = "pending";
-  o.pharmacyId = null;
-  o.pharmacyName = null;
-  o.workflowStatus = null;
-  o.availableItems = [];
-  o.unavailableItems = [];
-  o.price = null;
-}
+      if (workflowStatus === "out_for_delivery") {
+        o.status = "closed";
+      }
+      if (workflowStatus === "delivered") {
+        o.deliveredAt = new Date().toISOString();
+      }
+      if (workflowStatus === "cancelled") {
+        // يرجع الطلب لقائمة الانتظار عند باقي الصيادلة
+        if (!o.rejectedBy) o.rejectedBy = [];
+        if (!o.rejectedBy.includes(user.id)) o.rejectedBy.push(user.id); // عشان نفس الصيدلي ما ياخدوش تاني فورًا
+        o.status = "pending";
+        o.pharmacyId = null;
+        o.pharmacyName = null;
+        o.workflowStatus = null;
+        o.availableItems = [];
+        o.unavailableItems = [];
+        o.price = null;
+      }
       const timelineText = workflowLabels[workflowStatus];
       const timelineColor = workflowStatus === "cancelled" ? "#ef4444" : "#0ea5e9";
       o.timeline.push({ at: new Date().toISOString(), text: timelineText, color: timelineColor });
@@ -1039,6 +1068,10 @@ if (workflowStatus === "cancelled") {
        ...) على الطلبات الواقعة جوه المدة دي بس. "today" و"month"
        بيفضلوا بيشاورو على اليوم/الشهر الحاليين فعليًا (مفيدين حتى لو
        مفعّل فلتر مدة، كمرجع سريع لحركة اليوم الفعلي).
+
+       🆕🆕 (تعديل) الطلب "المقبول" مبيتحسبش في accepted / الإيرادات إلا
+       لما الصيدلي يدوس "تم استلام الطلب" (isCountedOrder). الطلب اللي
+       اتقبل ولسه ما اتستلمش (awaiting_receipt) بيتحسب "قيد الانتظار".
        ============================================================ */
     stats(range) {
       const from = range && toDateOrNull(range.from);
@@ -1054,7 +1087,10 @@ if (workflowStatus === "cancelled") {
         if (sameDay(d, now)) s.today++;
         if (sameMonth(d, now)) s.month++;
         s.total++;
-        if (o.status === "accepted" || o.status === "closed") { s.accepted++; s.revenue += o.price || 0; }
+        if (o.status === "accepted" || o.status === "closed") {
+          if (isCountedOrder(o)) { s.accepted++; s.revenue += o.price || 0; }
+          else s.pending++; // اتقبل بس لسه ما اتستلمش
+        }
         else if (o.status === "partial") { s.partial++; s.revenue += o.price || 0; }
         else if (o.status === "rejected") s.rejected++;
         else s.pending++;
@@ -1062,7 +1098,8 @@ if (workflowStatus === "cancelled") {
       return s;
     },
 
-    /* 🆕 pharmacyStats(range) — نفس فكرة stats() بس لكل صيدلية على حدة */
+    /* 🆕 pharmacyStats(range) — نفس فكرة stats() بس لكل صيدلية على حدة
+       🆕🆕 (تعديل) "منفذة" بقت بتتحسب بس لو الصيدلي داس "تم استلام الطلب" */
     pharmacyStats(range) {
       const from = range && toDateOrNull(range.from);
       let to = range && toDateOrNull(range.to);
@@ -1070,7 +1107,7 @@ if (workflowStatus === "cancelled") {
       const inR = (o) => !(from || to) || orderInRange(o, from, to);
 
       return this.getPharmacists().map((p) => {
-        const accepted = db.orders.filter((o) => o.pharmacyId === p.id && (o.status === "accepted" || o.status === "closed") && inR(o));
+        const accepted = db.orders.filter((o) => o.pharmacyId === p.id && (o.status === "accepted" || o.status === "closed") && isCountedOrder(o) && inR(o));
         const partial = db.orders.filter((o) => o.pharmacyId === p.id && o.status === "partial" && inR(o));
         const rejected = db.orders.filter((o) => o.rejectedBy && o.rejectedBy.includes(p.id) && inR(o));
         const perf = this.pharmacyPerformance(p);
