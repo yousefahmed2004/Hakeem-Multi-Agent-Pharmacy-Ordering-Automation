@@ -274,11 +274,16 @@ async function expireOverdueOrders() {
 
 async function retryPendingShippingWebhooks() {
     try {
+        // 🆕 بنجيب بس السلاسل اللي لسه ما اتبعتلهاش إشعار شحن (بدل فحص التاريخ كله)
         const candidates = await db.all(`
-            SELECT DISTINCT COALESCE("rootOrderId", id) AS root_id
-            FROM orders
-            WHERE "pharmacyId" IS NOT NULL
-              AND "workflowStatus" IN ('out_for_delivery', 'delivered')
+            SELECT DISTINCT COALESCE(o."rootOrderId", o.id) AS root_id
+            FROM orders o
+            WHERE o."pharmacyId" IS NOT NULL
+              AND o."workflowStatus" IN ('out_for_delivery', 'delivered')
+              AND NOT EXISTS (
+                SELECT 1 FROM shipping_notifications s
+                WHERE s."rootOrderId" = COALESCE(o."rootOrderId", o.id)
+              )
         `);
         for (const row of candidates) {
             const rootId = row.root_id;
@@ -772,15 +777,37 @@ async function trySendCombinedShippingWebhook(rootOrderId) {
 }
 
 /* ============================================================
-    جلب جميع الطلبات
+    🆕 runMaintenance — الأعمال الدورية (انتهاء المهل + إعادة محاولة الشحن)
+    ------------------------------------------------------------
+    كانت بتتنفذ جوه كل GET /orders (يعني كل 6 ثواني من كل مستخدم)، وده
+    كان بيبطّئ السيستم ويأخر رد القبول. دلوقتي بتتنفذ مرة كل 20 ثانية
+    على السيرفر بس، ومحمية من التداخل (maintenanceRunning).
     ============================================================ */
-router.get("/orders", async (req, res) => {
+const MAINTENANCE_INTERVAL_MS = Number(process.env.MAINTENANCE_INTERVAL_MS || 20000);
+let maintenanceRunning = false;
+async function runMaintenance() {
+    if (maintenanceRunning) return;
+    maintenanceRunning = true;
     try {
         await expireOverdueOrders();
         await expireStalePendingOrders();
         await expireStaleChildOrders();
-        retryPendingShippingWebhooks().catch(() => {}); // لا ننتظرها — لا يجب أن تؤخر رد القائمة
+        await retryPendingShippingWebhooks();
+    } catch (e) {
+        console.error("❌ خطأ في runMaintenance:", e.message);
+    } finally {
+        maintenanceRunning = false;
+    }
+}
+setInterval(runMaintenance, MAINTENANCE_INTERVAL_MS);
+runMaintenance();
 
+/* ============================================================
+    جلب جميع الطلبات
+    ============================================================ */
+router.get("/orders", async (req, res) => {
+    try {
+        // (الـ expire/retry بقوا بيتنفذوا في runMaintenance كل 20 ثانية — شوف فوق)
         const { status } = req.query;
         const viewer = getViewer(req); // 🆕 هوية اللي بيطلب (لخصوصية رقم العميل)
         let query = `
@@ -831,10 +858,6 @@ router.get("/orders", async (req, res) => {
     ============================================================ */
 router.get("/orders/:id", async (req, res) => {
     try {
-        await expireOverdueOrders();
-        await expireStalePendingOrders();
-        await expireStaleChildOrders();
-
         const { id } = req.params;
         const viewer = getViewer(req); // 🆕 هوية اللي بيطلب (لخصوصية رقم العميل)
         const query = `
@@ -1590,10 +1613,6 @@ router.patch("/orders/:id/reject/:pharmacyId", async (req, res) => {
     ============================================================ */
 router.get("/orders-stats", async (req, res) => {
     try {
-        await expireOverdueOrders();
-        await expireStalePendingOrders();
-        await expireStaleChildOrders();
-
         const stats = await db.get(`
             SELECT 
                 COUNT(*)::int as total,
