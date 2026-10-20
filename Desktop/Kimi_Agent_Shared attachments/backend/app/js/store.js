@@ -791,12 +791,22 @@ window.App = window.App || {};
 
       ensureExecutionProfile(pharmacist);
       pharmacist.executionStats.accepted += 1;
+
+      /* 🆕 تحديث محلي فوري بعد تأكيد السيرفر (من غير ما نستنى GET /orders
+         التقيلة) — السيرفر هو اللي أكّد القبول فعليًا (قفل FOR UPDATE)،
+         فالتحديث المحلي هنا آمن. المزامنة الكاملة بتحصل في الخلفية. */
+      o.status = "accepted";
+      o.pharmacyId = user.id;
+      o.pharmacyName = user.pharmacyName;
+      o.workflowStatus = "awaiting_receipt";
+      o.executionPending = true;
+      o.executionDeadline = new Date(Date.now() + 5 * 60 * 1000).toISOString(); // نفس مهلة الـ 5 دقايق في orders.js
+      o.availableItems = [...o.items];
+      o.unavailableItems = [];
       save(); emit();
 
-      // جلب الطلب المحدَّث فعليًا من السيرفر (المصدر الوحيد الموثوق للحالة)
-      await syncOrders();
-      const fresh = this.getOrder(id);
-      return fresh && fresh.pharmacyId === user.id ? fresh : null;
+      syncOrders(); // في الخلفية — بدون await
+      return o;
     },
 
     async partialOrder(id, user, available, unavailable, price, notes) {
