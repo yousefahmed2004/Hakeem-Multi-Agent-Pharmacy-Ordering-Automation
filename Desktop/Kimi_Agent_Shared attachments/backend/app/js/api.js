@@ -42,6 +42,23 @@ window.App = window.App || {};
     }
 
     /* ============================================================
+       🆕 viewerQuery() — هوية اللي بيطلب الطلبات
+       ------------------------------------------------------------
+       الباك إند بقى بيخفي رقم العميل من الرد إلا لو اللي بيطلب أدمن،
+       أو صيدلي مسؤول عن الطلب ودوس "تم استلام الطلب". عشان كده لازم
+       نبعت هويته مع GET /orders و GET /orders/:id.
+       ============================================================ */
+    function viewerQuery() {
+        try {
+            const u = App.store && typeof App.store.currentUser === "function" ? App.store.currentUser() : null;
+            if (!u) return "";
+            return `viewerId=${encodeURIComponent(u.id)}&viewerRole=${encodeURIComponent(u.role)}`;
+        } catch (e) {
+            return "";
+        }
+    }
+
+    /* ============================================================
        App.api — الواجهة الموحّدة اللي بيستخدمها store.js
        ============================================================ */
 
@@ -117,7 +134,8 @@ window.App = window.App || {};
 
         async getOrders() {
             try {
-                return await apiRequest("/orders");
+                const q = viewerQuery();
+                return await apiRequest(`/orders${q ? "?" + q : ""}`);
             } catch (error) {
                 console.error(
                     "❌ خطأ في جلب الطلبات:",
@@ -132,7 +150,8 @@ window.App = window.App || {};
         },
 
         async getOrder(id) {
-            return apiRequest(`/orders/${id}`);
+            const q = viewerQuery();
+            return apiRequest(`/orders/${id}${q ? "?" + q : ""}`);
         },
 
         async createOrder(orderData) {
